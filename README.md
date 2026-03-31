@@ -66,7 +66,7 @@ This repository includes a GitHub Actions workflow that runs automatically on th
 
 Set up the following secrets in your GitHub repository settings:
 
-- `GOOGLE_CREDS`: The content of your Google service account JSON key file
+- `GOOGLE_CREDS`: The content of your Google service account JSON key file (paste the entire JSON as-is)
 - `DELIVERY_SHEET_KEY`: Google Sheet key for attendance data
 - `REPORT_SHEET_KEY`: Google Sheet key for merged reports
 - `OUTPUT_SHEET_KEY`: Google Sheet key for output destination
