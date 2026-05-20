@@ -71,6 +71,7 @@ REPORT_NUMERIC_COLUMNS = [
     "Crosscheck Time (Minutes)",
     "Meeting Time (Minutes)",
     "Project Study (Minutes)",
+    "Training time (Minutes)",
     "Resource Training (Minutes) - This section is for lead",
     "Q&A Group support (Minutes)",
     "Documentation (Minutes)",
@@ -543,6 +544,7 @@ def build_project_report(
         "Project you worked on (Use Ctrl+F to search your required information)",
         "Annotation Time (Minutes)", "QA Time (Minutes)", "Crosscheck Time (Minutes)",
         "Meeting Time (Minutes)", "Project Study (Minutes)",
+        "Training time (Minutes)",
         "Resource Training (Minutes) - This section is for lead",
         "Q&A Group support (Minutes)", "Documentation (Minutes)", "Demo (Minutes)",
         "Break Time (Minutes)", "Server Downtime (Minutes)", "Free time (Minutes)",
@@ -558,6 +560,7 @@ def build_project_report(
     minute_cols = [
         "Annotation Time (Minutes)", "QA Time (Minutes)", "Crosscheck Time (Minutes)",
         "Meeting Time (Minutes)", "Project Study (Minutes)",
+        "Training time (Minutes)",
         "Resource Training (Minutes) - This section is for lead",
         "Q&A Group support (Minutes)", "Documentation (Minutes)", "Demo (Minutes)",
         "Break Time (Minutes)", "Server Downtime (Minutes)", "Free time (Minutes)",
@@ -713,6 +716,7 @@ def build_merged_report(
     minute_cols = [
         "Annotation Time (Minutes)", "QA Time (Minutes)", "Crosscheck Time (Minutes)",
         "Meeting Time (Minutes)", "Project Study (Minutes)",
+        "Training time (Minutes)",
         "Resource Training (Minutes) - This section is for lead",
         "Q&A Group support (Minutes)", "Documentation (Minutes)", "Demo (Minutes)",
         "Break Time (Minutes)", "Server Downtime (Minutes)", "Free time (Minutes)",
@@ -762,6 +766,7 @@ def build_time_tracking_hours_report(internal_log_data: pd.DataFrame) -> pd.Data
         "Crosscheck Time (Minutes)",
         "Meeting Time (Minutes)",
         "Project Study (Minutes)",
+        "Training time (Minutes)",
         "Resource Training (Minutes) - This section is for lead",
         "Q&A Group support (Minutes)",
         "Documentation (Minutes)",
@@ -806,6 +811,7 @@ def build_time_tracking_hours_report(internal_log_data: pd.DataFrame) -> pd.Data
         df_log["Crosscheck Time (Minutes)"]
         + df_log["Meeting Time (Minutes)"]
         + df_log["Project Study (Minutes)"]
+        + df_log["Training time (Minutes)"]
         + df_log["Resource Training (Minutes) - This section is for lead"]
         + df_log["Q&A Group support (Minutes)"]
         + df_log["Documentation (Minutes)"]
@@ -822,6 +828,7 @@ def build_time_tracking_hours_report(internal_log_data: pd.DataFrame) -> pd.Data
             "Crosscheck Time (Minutes)": "sum",
             "Meeting Time (Minutes)": "sum",
             "Project Study (Minutes)": "sum",
+            "Training time (Minutes)": "sum",
             "Resource Training (Minutes) - This section is for lead": "sum",
             "Q&A Group support (Minutes)": "sum",
             "Documentation (Minutes)": "sum",
