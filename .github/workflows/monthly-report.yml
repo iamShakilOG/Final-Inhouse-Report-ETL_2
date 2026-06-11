@@ -43,6 +43,9 @@ jobs:
 
           DELIVERY_SHEET_KEY: ${{ secrets.DELIVERY_SHEET_KEY }}
           DELIVERY_WORKSHEET_NAME: ${{ secrets.DELIVERY_WORKSHEET_NAME || 'Team List & Activity' }}
+          MONTHLY_ATTENDANCE_SHEET_KEY: ${{ secrets.MONTHLY_ATTENDANCE_SHEET_KEY || secrets.DELIVERY_SHEET_KEY }}
+          MONTHLY_ATTENDANCE_WORKSHEET_NAME: ${{ secrets.MONTHLY_ATTENDANCE_WORKSHEET_NAME || 'Monthly Attendance' }}
+          MONTHLY_ATTENDANCE_HEADER_ROW: ${{ secrets.MONTHLY_ATTENDANCE_HEADER_ROW || '2' }}
           RESIGNED_WORKSHEET_NAME: ${{ secrets.RESIGNED_WORKSHEET_NAME || 'Resign/Terminated' }}
 
           CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
