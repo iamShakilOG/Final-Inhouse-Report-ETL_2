@@ -82,6 +82,28 @@ REPORT_NUMERIC_COLUMNS = [
     "Total Logged Hours",
 ]
 
+TRAINING_MINUTE_TO_HOUR_EXPORT_COLUMNS = {
+    "Training time (Minutes)": "Training Hours",
+    "Resource Training (Minutes) - This section is for lead": "Resource Training Hours",
+}
+
+SUMMARY_DETAIL_COLUMNS = [
+    "Annotation Time (Minutes)",
+    "QA Time (Minutes)",
+    "Crosscheck Time (Minutes)",
+    "Meeting Time (Minutes)",
+    "Project Study (Minutes)",
+    "Training time (Minutes)",
+    "Resource Training (Minutes) - This section is for lead",
+    "Q&A Group support (Minutes)",
+    "Documentation (Minutes)",
+    "Demo (Minutes)",
+    "Break Time (Minutes)",
+    "Server Downtime (Minutes)",
+    "Free time (Minutes)",
+    "Total Logged Hours",
+]
+
 REPORT_REQUIRED_COLUMNS = [
     "REPORT_MONTH",
     "QAI ID",
@@ -92,6 +114,7 @@ REPORT_REQUIRED_COLUMNS = [
 ]
 
 ATTENDANCE_REQUIRED_COLUMNS = ["QAI ID", "Joining Date", "Role"]
+MONTHLY_ATTENDANCE_REQUIRED_COLUMNS = ["QAI ID"]
 RESIGNED_REQUIRED_COLUMNS = ["ID", "LWD"]
 
 EXCLUDED_RESOURCE_TYPES = {"REMOTE", "CLIENT", "VENDOR"}
@@ -108,6 +131,9 @@ class Config:
     internal_tab: str
     delivery_sheet_key: str
     delivery_worksheet_name: str
+    monthly_attendance_sheet_key: str
+    monthly_attendance_worksheet_name: str
+    monthly_attendance_header_row: int
     resigned_worksheet_name: str
 
     # clickup
@@ -185,6 +211,14 @@ def parse_args() -> Config:
         internal_tab=get_env("INTERNAL_LOG_TAB", "Form Responses 1"),
         delivery_sheet_key=get_env("DELIVERY_SHEET_KEY", "1YgIGvaN0NA6M2k5oHSJF-m0S8A5EhC6OkTCYfjT3bjw"),
         delivery_worksheet_name=get_env("DELIVERY_WORKSHEET_NAME", "Team List & Activity"),
+        monthly_attendance_sheet_key=get_env(
+            "MONTHLY_ATTENDANCE_SHEET_KEY",
+            get_env("DELIVERY_SHEET_KEY", "1YgIGvaN0NA6M2k5oHSJF-m0S8A5EhC6OkTCYfjT3bjw"),
+        ),
+        monthly_attendance_worksheet_name=get_env("MONTHLY_ATTENDANCE_WORKSHEET_NAME", "Monthly Attendance"),
+        monthly_attendance_header_row=parse_optional_int(
+            get_env("MONTHLY_ATTENDANCE_HEADER_ROW", "2")
+        ) or 2,
         resigned_worksheet_name=get_env("RESIGNED_WORKSHEET_NAME", "Resign/Terminated"),
         clickup_api_token=get_env("CLICKUP_API_TOKEN", required=True),
         clickup_list_id=get_env("CLICKUP_LIST_ID", required=True),
@@ -214,6 +248,9 @@ def validate_config(config: Config) -> None:
         "internal_tab": config.internal_tab,
         "delivery_sheet_key": config.delivery_sheet_key,
         "delivery_worksheet_name": config.delivery_worksheet_name,
+        "monthly_attendance_sheet_key": config.monthly_attendance_sheet_key,
+        "monthly_attendance_worksheet_name": config.monthly_attendance_worksheet_name,
+        "monthly_attendance_header_row": config.monthly_attendance_header_row,
         "resigned_worksheet_name": config.resigned_worksheet_name,
         "clickup_api_token": config.clickup_api_token,
         "clickup_list_id": config.clickup_list_id,
@@ -267,6 +304,23 @@ def accuracy_to_ratio(x) -> float:
     return round(v, 4)
 
 
+def parse_monthly_attendance_header_date(column_name: str) -> Optional[datetime]:
+    value = str(column_name).strip()
+    if not value:
+        return None
+
+    for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime()
+
+
 def normalize_date_str(value: object) -> str:
     if value is None:
         return ""
@@ -311,8 +365,18 @@ def build_gspread_client(creds_path: str) -> gspread.Client:
     return gspread.authorize(credentials)
 
 
-def fetch_sheet_df_by_key(client: gspread.Client, sheet_key: str, tab_name: str) -> pd.DataFrame:
-    LOGGER.info("Fetching worksheet '%s' from sheet key %s", tab_name, sheet_key)
+def fetch_sheet_df_by_key(
+    client: gspread.Client,
+    sheet_key: str,
+    tab_name: str,
+    header_row: int = 1,
+) -> pd.DataFrame:
+    LOGGER.info(
+        "Fetching worksheet '%s' from sheet key %s using header row %s",
+        tab_name,
+        sheet_key,
+        header_row,
+    )
     ws = client.open_by_key(sheet_key).worksheet(tab_name)
     values = ws.get_all_values()
 
@@ -320,11 +384,27 @@ def fetch_sheet_df_by_key(client: gspread.Client, sheet_key: str, tab_name: str)
         LOGGER.warning("Worksheet '%s' is empty", tab_name)
         return pd.DataFrame()
 
-    header = values[0]
-    rows = values[1:] if len(values) > 1 else []
+    header_index = max(header_row - 1, 0)
+    if header_index >= len(values):
+        LOGGER.warning(
+            "Worksheet '%s' does not have header row %s; found only %s rows",
+            tab_name,
+            header_row,
+            len(values),
+        )
+        return pd.DataFrame()
+
+    header = values[header_index]
+    rows = values[header_index + 1:] if len(values) > header_index + 1 else []
     df = pd.DataFrame(rows, columns=header)
     LOGGER.info("Loaded %s rows from '%s'", len(df), tab_name)
     return df
+
+
+def prepare_hour_named_export_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    rename_map = {src: dst for src, dst in TRAINING_MINUTE_TO_HOUR_EXPORT_COLUMNS.items() if src in out.columns}
+    return out.rename(columns=rename_map)
 
 
 def ensure_worksheet_by_url(
@@ -850,52 +930,77 @@ def build_time_tracking_hours_report(internal_log_data: pd.DataFrame) -> pd.Data
 # Second Flow: Summary and related tabs
 # -----------------------------
 
-def build_monthly_attendance_dataframe(attendance_df: pd.DataFrame) -> pd.DataFrame:
+def build_roster_metadata_dataframe(attendance_df: pd.DataFrame) -> pd.DataFrame:
     require_columns(attendance_df, ATTENDANCE_REQUIRED_COLUMNS, "Team List & Activity worksheet")
-    LOGGER.info("Building month-wise attendance dataframe")
+    LOGGER.info("Building roster metadata from Team List & Activity")
 
     df = attendance_df.copy()
     df["QAI ID"] = df["QAI ID"].astype(str).str.strip()
     df["Joining Date"] = df["Joining Date"].apply(normalize_date_str)
     df["Role"] = df["Role"].astype(str).str.strip()
+    df = df[df["QAI ID"].ne("")].copy()
+
+    if df.empty:
+        return pd.DataFrame(columns=["QAI ID", "Joining Date", "Role"])
+
+    return (
+        df.groupby("QAI ID", as_index=False)
+        .agg({
+            "Joining Date": most_common_non_empty,
+            "Role": most_common_non_empty,
+        })
+    )
+
+
+def build_monthly_attendance_dataframe(
+    monthly_attendance_df: pd.DataFrame,
+    roster_metadata_df: pd.DataFrame,
+) -> pd.DataFrame:
+    require_columns(
+        monthly_attendance_df,
+        MONTHLY_ATTENDANCE_REQUIRED_COLUMNS,
+        "Monthly Attendance worksheet",
+    )
+    require_columns(roster_metadata_df, ["QAI ID", "Joining Date", "Role"], "roster metadata dataframe")
+    LOGGER.info("Building attendance dataframe from Monthly Attendance date columns")
+
+    attendance = monthly_attendance_df.copy()
+    attendance["QAI ID"] = attendance["QAI ID"].astype(str).str.strip()
+    attendance = attendance[attendance["QAI ID"].ne("")].copy()
 
     date_columns: Dict[str, datetime] = {}
-    for column in df.columns:
-        try:
-            date_columns[column] = datetime.strptime(column.strip(), "%m/%d/%Y")
-        except ValueError:
-            continue
+    for column in attendance.columns:
+        parsed = parse_monthly_attendance_header_date(column)
+        if parsed is not None:
+            date_columns[column] = parsed
 
     if not date_columns:
-        raise DataValidationError("No attendance date columns found with MM/DD/YYYY format.")
+        raise DataValidationError(
+            "No attendance date columns found in Monthly Attendance worksheet."
+        )
 
     rows = []
-    for _, row in df.iterrows():
+    for _, row in attendance.iterrows():
         qai_id = str(row.get("QAI ID", "")).strip()
         if not qai_id:
             continue
-
-        joining_date = str(row.get("Joining Date", "")).strip()
-        role = str(row.get("Role", "")).strip()
 
         month_groups: Dict[str, List[str]] = {}
         for column, parsed_date in date_columns.items():
             month_label = parsed_date.strftime("%B - %Y")
             month_groups.setdefault(month_label, []).append(column)
 
-        for month_label, cols in month_groups.items():
+        for month_label, columns in month_groups.items():
             active_days = 0
-            for col in cols:
-                val = str(row.get(col, "")).strip()
-                if val and val.lower() != "unavailable":
+            for column in columns:
+                value = str(row.get(column, "")).strip()
+                if value and value.lower() not in {"unavailable", "nan", "none"}:
                     active_days += 1
 
             rows.append(
                 {
                     "QAI ID": qai_id,
                     "Month": month_label,
-                    "Joining Date": joining_date,
-                    "Role": role,
                     "Active Days": float(active_days),
                     "Active Hour": float(active_days * 8),
                 }
@@ -910,13 +1015,15 @@ def build_monthly_attendance_dataframe(attendance_df: pd.DataFrame) -> pd.DataFr
     out = (
         out.groupby(["QAI ID", "Month"], as_index=False)
         .agg({
-            "Joining Date": most_common_non_empty,
-            "Role": most_common_non_empty,
             "Active Days": "max",
             "Active Hour": "max",
         })
     )
-    return out
+    out = out.merge(roster_metadata_df, on="QAI ID", how="left")
+    out["Joining Date"] = out["Joining Date"].fillna("")
+    out["Role"] = out["Role"].fillna("")
+    out = out[["QAI ID", "Month", "Joining Date", "Role", "Active Days", "Active Hour"]]
+    return out.reset_index(drop=True)
 
 
 def build_summary_from_merged(report_df: pd.DataFrame, report_year_filter: Optional[int] = None) -> pd.DataFrame:
@@ -953,6 +1060,7 @@ def build_summary_from_merged(report_df: pd.DataFrame, report_year_filter: Optio
             "Resource Type": most_common_non_empty,
             "Resource Allocation": most_common_non_empty,
             "Effective Work Hour": "sum",
+            **{column: "sum" for column in SUMMARY_DETAIL_COLUMNS},
         })
     )
 
@@ -964,11 +1072,14 @@ def build_summary_from_merged(report_df: pd.DataFrame, report_year_filter: Optio
             "Resource Allocation",
             "Month",
             "Effective Work Hour",
+            *SUMMARY_DETAIL_COLUMNS,
         ]
     ].copy()
 
     summary_df = summary_df.rename(columns={"Effective Work Hour": "Effective Hours"})
     summary_df["Effective Hours"] = pd.to_numeric(summary_df["Effective Hours"], errors="coerce").fillna(0)
+    for column in SUMMARY_DETAIL_COLUMNS:
+        summary_df[column] = pd.to_numeric(summary_df[column], errors="coerce").fillna(0)
 
     summary_df["Month_dt"] = pd.to_datetime(summary_df["Month"], format="%B - %Y", errors="coerce")
     summary_df = summary_df.sort_values(["QAI ID", "Month_dt", "Full Name"], kind="stable").drop(columns=["Month_dt"])
@@ -1055,25 +1166,39 @@ def build_status_mapping(attendance_df: pd.DataFrame, resigned_df: pd.DataFrame)
 def enrich_summary(
     summary_df: pd.DataFrame,
     monthly_attendance_df: pd.DataFrame,
+    roster_metadata_df: pd.DataFrame,
     status_df: pd.DataFrame,
 ) -> pd.DataFrame:
     LOGGER.info("Enriching summary with attendance, role, status, and LWD")
 
     out = summary_df.merge(monthly_attendance_df, on=["QAI ID", "Month"], how="left")
+    out = out.merge(
+        roster_metadata_df.rename(
+            columns={
+                "Joining Date": "Joining Date_roster",
+                "Role": "Role_roster",
+            }
+        ),
+        on="QAI ID",
+        how="left",
+    )
     out = out.merge(status_df, on="QAI ID", how="left")
 
-    out["Joining Date"] = out["Joining Date"].fillna("")
-    out["Role"] = out["Role"].fillna("")
+    out["Joining Date"] = out["Joining Date"].fillna(out["Joining Date_roster"]).fillna("")
+    out["Role"] = out["Role"].fillna(out["Role_roster"]).fillna("")
     out["Active Days"] = pd.to_numeric(out["Active Days"], errors="coerce").fillna(0)
     out["Active Hour"] = pd.to_numeric(out["Active Hour"], errors="coerce").fillna(0)
     out["Status"] = out["Status"].fillna("Unknown")
     out["LWD"] = out["LWD"].fillna("")
     out["Effective Hours"] = pd.to_numeric(out["Effective Hours"], errors="coerce").fillna(0)
+    for column in SUMMARY_DETAIL_COLUMNS:
+        out[column] = pd.to_numeric(out[column], errors="coerce").fillna(0)
     out["total_prod_hours"] = pd.to_numeric(out["total_prod_hours"], errors="coerce").fillna(0)
     out["total_other_time"] = pd.to_numeric(out["total_other_time"], errors="coerce").fillna(0)
 
     out["Final Hour"] = out["Effective Hours"] + out["total_other_time"]
     out["Difference"] = out["Active Hour"] - out["Final Hour"]
+    out = out.drop(columns=["Joining Date_roster", "Role_roster"])
 
     ordered_cols = [
         "QAI ID",
@@ -1086,6 +1211,7 @@ def enrich_summary(
         "Resource Allocation",
         "Month",
         "Effective Hours",
+        *SUMMARY_DETAIL_COLUMNS,
         "total_prod_hours",
         "total_other_time",
         "Final Hour",
@@ -1157,6 +1283,12 @@ def run(config: Config) -> None:
     project_data = fetch_sheet_df_by_key(client, config.project_sheet_key, config.project_tab)
     internal_log_data = fetch_sheet_df_by_key(client, config.internal_sheet_key, config.internal_tab)
     attendance_df = fetch_sheet_df_by_key(client, config.delivery_sheet_key, config.delivery_worksheet_name)
+    monthly_attendance_source_df = fetch_sheet_df_by_key(
+        client,
+        config.monthly_attendance_sheet_key,
+        config.monthly_attendance_worksheet_name,
+        header_row=config.monthly_attendance_header_row,
+    )
     resigned_df = fetch_sheet_df_by_key(client, config.delivery_sheet_key, config.resigned_worksheet_name)
 
     # ClickUp
@@ -1172,16 +1304,30 @@ def run(config: Config) -> None:
 
     # Export first flow
     export_df_to_sheet(client, config.output_sheet_url, config.project_report_tab, project_report_df)
-    export_df_to_sheet(client, config.output_sheet_url, config.merged_tab, merged_report_df)
-    export_df_to_sheet(client, config.output_sheet_url, config.time_tracking_tab, time_tracking_hours_df)
+    export_df_to_sheet(
+        client,
+        config.output_sheet_url,
+        config.merged_tab,
+        prepare_hour_named_export_columns(merged_report_df),
+    )
+    export_df_to_sheet(
+        client,
+        config.output_sheet_url,
+        config.time_tracking_tab,
+        prepare_hour_named_export_columns(time_tracking_hours_df),
+    )
 
     # Build second flow in memory from generated data
-    monthly_attendance_df = build_monthly_attendance_dataframe(attendance_df)
     summary_base_df = build_summary_from_merged(merged_report_df, config.report_year_filter)
+    roster_metadata_df = build_roster_metadata_dataframe(attendance_df)
+    monthly_attendance_df = build_monthly_attendance_dataframe(
+        monthly_attendance_source_df,
+        roster_metadata_df,
+    )
     time_tracking_lookup_df = build_time_tracking_lookup(time_tracking_hours_df)
     summary_base_df = attach_time_tracking_to_summary(summary_base_df, time_tracking_lookup_df)
     status_df = build_status_mapping(attendance_df, resigned_df)
-    summary_df = enrich_summary(summary_base_df, monthly_attendance_df, status_df)
+    summary_df = enrich_summary(summary_base_df, monthly_attendance_df, roster_metadata_df, status_df)
 
     inhouse_df = build_inhouse_report(summary_df)
     present_teamlist_df, not_present_teamlist_df = build_teamlist_presence_outputs_from_summary(

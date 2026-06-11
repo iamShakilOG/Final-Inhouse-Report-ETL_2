@@ -36,6 +36,8 @@ The script uses environment variables for configuration. You can set them in you
 - `GOOGLE_CREDS_FILE`: Path to Google service account JSON credentials file
 - `DELIVERY_SHEET_KEY`: Google Sheet key for the attendance source
 - `DELIVERY_WORKSHEET_NAME`: Worksheet name for the attendance source
+- `MONTHLY_ATTENDANCE_SHEET_KEY`: Google Sheet key for the monthly attendance source
+- `MONTHLY_ATTENDANCE_WORKSHEET_NAME`: Worksheet name for monthly attendance (default: "Monthly Attendance")
 - `REPORT_SHEET_KEY`: Google Sheet key for the merged report source
 - `REPORT_WORKSHEET_NAME`: Worksheet name for the merged report source
 - `OUTPUT_SHEET_KEY`: Google Sheet key for the upload target
@@ -68,12 +70,14 @@ Set up the following secrets in your GitHub repository settings:
 
 - `GOOGLE_CREDS`: The base64-encoded content of your Google service account JSON key file (encode with `base64 -w 0 your-key.json` on Linux/Mac or use an online encoder)
 - `DELIVERY_SHEET_KEY`: Google Sheet key for attendance data
+- `MONTHLY_ATTENDANCE_SHEET_KEY`: Google Sheet key for monthly attendance data
 - `REPORT_SHEET_KEY`: Google Sheet key for merged reports
 - `OUTPUT_SHEET_KEY`: Google Sheet key for output destination
 
 ### Optional Secrets
 
 - `DELIVERY_WORKSHEET_NAME`: Worksheet name for attendance (default: "Team List & Activity")
+- `MONTHLY_ATTENDANCE_WORKSHEET_NAME`: Worksheet name for monthly attendance (default: "Monthly Attendance")
 - `REPORT_WORKSHEET_NAME`: Worksheet name for reports (default: "Merged")
 - `OUTPUT_BREAKDOWN_WORKSHEET`: Output worksheet name for breakdown (default: "Total Breakdown")
 - `OUTPUT_SUMMARY_WORKSHEET`: Output worksheet name for summary (default: "Summary")
