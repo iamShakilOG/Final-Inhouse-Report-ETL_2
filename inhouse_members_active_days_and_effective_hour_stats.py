@@ -104,6 +104,41 @@ SUMMARY_DETAIL_COLUMNS = [
     "Total Logged Hours",
 ]
 
+INTERNAL_TIME_TRACKING_MINUTE_COLUMNS = [
+    "Annotation Time (Minutes)",
+    "QA Time (Minutes)",
+    "Crosscheck Time (Minutes)",
+    "Meeting Time (Minutes)",
+    "Project Study (Minutes)",
+    "Resource Training (Minutes) - This section is for lead",
+    "Q&A Group support (Minutes)",
+    "Documentation (Minutes)",
+    "Demo (Minutes)",
+    "Training time (Minutes)",
+    "Break Time (Minutes)",
+    "Server Downtime (Minutes)",
+    "Free time (Minutes)",
+]
+
+INTERNAL_TIME_TRACKING_HOUR_RENAMES = {
+    "Annotation Time (Minutes)": "Annotation Hours",
+    "QA Time (Minutes)": "QA Hours",
+    "Crosscheck Time (Minutes)": "Crosscheck Hours",
+    "Meeting Time (Minutes)": "Meeting Hours",
+    "Project Study (Minutes)": "Project Study Hours",
+    "Resource Training (Minutes) - This section is for lead": "Resource Training Hours",
+    "Q&A Group support (Minutes)": "Q&A Group support Hours",
+    "Documentation (Minutes)": "Documentation Hours",
+    "Demo (Minutes)": "Demo Hours",
+    "Training time (Minutes)": "Training Hours",
+    "Break Time (Minutes)": "Break Hours",
+    "Server Downtime (Minutes)": "Server Downtime Hours",
+    "Free time (Minutes)": "Free Time Hours",
+}
+
+INTERNAL_TIME_TRACKING_GROUP_COLUMNS = ["QAI ID", "Month", "Year"]
+INTERNAL_TIME_TRACKING_HOUR_COLUMNS = list(INTERNAL_TIME_TRACKING_HOUR_RENAMES.values())
+
 REPORT_REQUIRED_COLUMNS = [
     "REPORT_MONTH",
     "QAI ID",
@@ -341,6 +376,69 @@ def parse_report_month(value: str) -> str | None:
         return None
 
 
+def parse_any_month_to_report_month(value: object) -> str | None:
+    value_str = str(value).strip()
+    if not value_str or value_str.lower() in {"nan", "none"}:
+        return None
+
+    for fmt in (
+        "%Y-%m",
+        "%Y-%m-%d",
+        "%B - %Y",
+        "%b - %Y",
+        "%m/%d/%Y",
+        "%d-%b-%Y",
+        "%d-%B-%Y",
+    ):
+        try:
+            dt = datetime.strptime(value_str, fmt)
+            return dt.strftime("%Y-%m")
+        except ValueError:
+            continue
+
+    parsed = pd.to_datetime(value_str, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.strftime("%Y-%m")
+
+
+def infer_report_month_series(df: pd.DataFrame) -> pd.Series:
+    possible_month_cols = [
+        "REPORT_MONTH",
+        "Month",
+        "Select Month",
+        "Reporting Month",
+        "Timestamp",
+        "Date",
+        "Submitted At",
+    ]
+
+    out = pd.Series([""] * len(df), index=df.index, dtype="object")
+    if "Month" in df.columns and "Year" in df.columns:
+        month_text = df["Month"].astype(str).str.strip()
+        year_text = df["Year"].astype(str).str.strip()
+        combined = month_text + " - " + year_text
+        combined = combined.mask(
+            month_text.str.lower().isin(["", "nan", "none"])
+            | year_text.str.lower().isin(["", "nan", "none"]),
+            "",
+        )
+        combined = combined.apply(parse_any_month_to_report_month).fillna("")
+        out = out.where(out != "", combined)
+
+    for col in possible_month_cols:
+        if col not in df.columns:
+            continue
+        if col in {"Timestamp", "Date", "Submitted At"}:
+            candidate = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m").fillna("")
+        elif col == "Month" and "Year" in df.columns:
+            continue
+        else:
+            candidate = df[col].map(parse_any_month_to_report_month).fillna("")
+        out = out.where(out != "", candidate)
+    return out
+
+
 def most_common_non_empty(series: pd.Series) -> str:
     cleaned = (
         series.astype(str)
@@ -562,9 +660,11 @@ def build_project_report(
     for col in ["Effective Work Hour", "Bonus", "Penalty", "Final Working Hour", "Accuracy", "Client Billing Hours"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
+    df["Month"] = df["Month"].map(parse_any_month_to_report_month).fillna("")
     df["Accuracy"] = df["Accuracy"].apply(accuracy_to_ratio)
     df["Resource Type"] = df["Resource Type"].astype(str).str.strip().str.upper()
     df["Project Batch"] = df["Project Batch"].astype(str).str.strip()
+    df = df[df["Month"].ne("")].copy()
 
     df = df.drop(columns=["Industry Type"], errors="ignore")
     df = df.merge(clickup_industry_df, on="Project Batch", how="left")
@@ -636,6 +736,8 @@ def build_project_report(
     df_log["Project Batch"] = df_log[
         "Project you worked on (Use Ctrl+F to search your required information)"
     ].astype(str).str.strip()
+    df_log["Month"] = infer_report_month_series(df_log)
+    df_log = df_log[df_log["Month"].ne("")].copy()
 
     minute_cols = [
         "Annotation Time (Minutes)", "QA Time (Minutes)", "Crosscheck Time (Minutes)",
@@ -659,7 +761,7 @@ def build_project_report(
     )
 
     log_summary = (
-        df_log.groupby("Project Batch")
+        df_log.groupby(["Project Batch", "Month"], dropna=False)
         .agg({
             "Total Logged Hours": "sum",
             "Other Hours (Excl. Anno+QA)": "sum",
@@ -688,7 +790,7 @@ def build_project_report(
 
     final_df = (
         project_pivot.merge(remote_summary_fixed, on="Project Batch", how="left")
-        .merge(log_summary, on="Project Batch", how="left")
+        .merge(log_summary, on=["Project Batch", "Month"], how="left")
         .merge(type_pivot, on="Project Batch", how="left")
         .fillna(0)
     )
@@ -803,6 +905,8 @@ def build_merged_report(
     ]
 
     df_log = ensure_columns(df_log, minute_cols + ["Project Batch", "QAI ID"], 0)
+    df_log["REPORT_MONTH"] = infer_report_month_series(df_log)
+    df_log = df_log[df_log["REPORT_MONTH"].ne("")].copy()
 
     for c in minute_cols:
         df_log[c] = pd.to_numeric(df_log[c], errors="coerce").fillna(0) / 60
@@ -812,12 +916,12 @@ def build_merged_report(
     df_log["Total Logged Hours"] = df_log[minute_cols].sum(axis=1)
 
     log_grouped = (
-        df_log.groupby(["Project Batch", "QAI ID"], dropna=False)
+        df_log.groupby(["Project Batch", "QAI ID", "REPORT_MONTH"], dropna=False)
         .agg({**{c: "sum" for c in minute_cols}, "Total Logged Hours": "sum"})
         .reset_index()
     )
 
-    merged = df_proj.merge(log_grouped, on=["Project Batch", "QAI ID"], how="left")
+    merged = df_proj.merge(log_grouped, on=["Project Batch", "QAI ID", "REPORT_MONTH"], how="left")
 
     for c in merged.columns:
         if pd.api.types.is_datetime64_any_dtype(merged[c]):
@@ -831,8 +935,8 @@ def build_merged_report(
 def build_time_tracking_hours_report(internal_log_data: pd.DataFrame) -> pd.DataFrame:
     """
     Uses ONLY Internal Log data.
-    Grouped by QAI ID + Month.
-    Does NOT include Project name.
+    Grouped by QAI ID + Month + Year.
+    Converts minute columns into hour columns before aggregation.
     """
     df_log = internal_log_data.copy()
 
@@ -840,87 +944,46 @@ def build_time_tracking_hours_report(internal_log_data: pd.DataFrame) -> pd.Data
         "QAI ID (Use Ctrl+F to search your required information)": "QAI ID",
     })
 
-    minute_cols = [
-        "Annotation Time (Minutes)",
-        "QA Time (Minutes)",
-        "Crosscheck Time (Minutes)",
-        "Meeting Time (Minutes)",
-        "Project Study (Minutes)",
-        "Training time (Minutes)",
-        "Resource Training (Minutes) - This section is for lead",
-        "Q&A Group support (Minutes)",
-        "Documentation (Minutes)",
-        "Demo (Minutes)",
-        "Server Downtime (Minutes)",
-        "Free time (Minutes)",
-    ]
-
-    possible_month_cols = [
-        "Month",
-        "Select Month",
-        "Reporting Month",
-        "Timestamp",
-        "Date",
-        "Submitted At",
-    ]
-
-    df_log = ensure_columns(df_log, ["QAI ID"] + minute_cols, 0)
+    df_log = ensure_columns(df_log, ["QAI ID"] + INTERNAL_TIME_TRACKING_MINUTE_COLUMNS, 0)
     df_log["QAI ID"] = df_log["QAI ID"].astype(str).str.strip()
+    df_log["REPORT_MONTH"] = infer_report_month_series(df_log)
+    df_log = df_log[df_log["REPORT_MONTH"].ne("")].copy()
 
-    for c in minute_cols:
-        df_log[c] = pd.to_numeric(df_log[c], errors="coerce").fillna(0)
+    df_log["Month_dt"] = pd.to_datetime(df_log["REPORT_MONTH"], format="%Y-%m", errors="coerce")
+    df_log = df_log[df_log["Month_dt"].notna()].copy()
+    df_log["Month"] = df_log["Month_dt"].dt.strftime("%B - %Y")
+    df_log["Year"] = df_log["Month_dt"].dt.year
 
-    df_log["Month"] = ""
+    for c in INTERNAL_TIME_TRACKING_MINUTE_COLUMNS:
+        df_log[c] = pd.to_numeric(df_log[c], errors="coerce").fillna(0) / 60
+        df_log = df_log.rename(columns={c: INTERNAL_TIME_TRACKING_HOUR_RENAMES[c]})
 
-    for col in possible_month_cols:
-        if col in df_log.columns:
-            if col in {"Timestamp", "Date", "Submitted At"}:
-                parsed = pd.to_datetime(df_log[col], errors="coerce")
-                candidate = parsed.dt.strftime("%B - %Y").fillna("")
-            else:
-                candidate = df_log[col].astype(str).str.strip()
-                candidate = candidate.mask(candidate.str.lower().isin(["nan", "none"]), "")
-
-            df_log["Month"] = df_log["Month"].where(df_log["Month"] != "", candidate)
-
-    df_log["Production Hours"] = (
-        df_log["Annotation Time (Minutes)"] + df_log["QA Time (Minutes)"]
-    ) / 60
-
+    df_log["Production Hours"] = df_log["Annotation Hours"] + df_log["QA Hours"]
     df_log["Other Time Tracking Hours"] = (
-        df_log["Crosscheck Time (Minutes)"]
-        + df_log["Meeting Time (Minutes)"]
-        + df_log["Project Study (Minutes)"]
-        + df_log["Training time (Minutes)"]
-        + df_log["Resource Training (Minutes) - This section is for lead"]
-        + df_log["Q&A Group support (Minutes)"]
-        + df_log["Documentation (Minutes)"]
-        + df_log["Demo (Minutes)"]
-        + df_log["Server Downtime (Minutes)"]
-        + df_log["Free time (Minutes)"]
-    ) / 60
+        df_log["Crosscheck Hours"]
+        + df_log["Meeting Hours"]
+        + df_log["Project Study Hours"]
+        + df_log["Resource Training Hours"]
+        + df_log["Q&A Group support Hours"]
+        + df_log["Documentation Hours"]
+        + df_log["Demo Hours"]
+        + df_log["Training Hours"]
+        + df_log["Break Hours"]
+        + df_log["Server Downtime Hours"]
+        + df_log["Free Time Hours"]
+    )
 
     grouped = (
-        df_log.groupby(["QAI ID", "Month"], dropna=False)
+        df_log.groupby(INTERNAL_TIME_TRACKING_GROUP_COLUMNS, dropna=False)
         .agg({
-            "Annotation Time (Minutes)": "sum",
-            "QA Time (Minutes)": "sum",
-            "Crosscheck Time (Minutes)": "sum",
-            "Meeting Time (Minutes)": "sum",
-            "Project Study (Minutes)": "sum",
-            "Training time (Minutes)": "sum",
-            "Resource Training (Minutes) - This section is for lead": "sum",
-            "Q&A Group support (Minutes)": "sum",
-            "Documentation (Minutes)": "sum",
-            "Demo (Minutes)": "sum",
-            "Server Downtime (Minutes)": "sum",
-            "Free time (Minutes)": "sum",
+            **{column: "sum" for column in INTERNAL_TIME_TRACKING_HOUR_RENAMES.values()},
             "Production Hours": "sum",
             "Other Time Tracking Hours": "sum",
         })
         .reset_index()
-        .sort_values(["Month", "QAI ID"], ascending=[True, True])
     )
+    grouped["Month_dt"] = pd.to_datetime(grouped["Month"], format="%B - %Y", errors="coerce")
+    grouped = grouped.sort_values(["Year", "Month_dt", "QAI ID"], ascending=[True, True, True]).drop(columns=["Month_dt"])
 
     LOGGER.info("Time tracking hours report prepared | Rows=%s", len(grouped))
     return grouped
@@ -1046,6 +1109,7 @@ def build_summary_from_merged(report_df: pd.DataFrame, report_year_filter: Optio
     df = df[df["QAI ID"].ne("") & df["REPORT_MONTH"].ne("")].copy()
     df["Month"] = df["REPORT_MONTH"].apply(parse_report_month)
     df = df[df["Month"].notna()].copy()
+    df["Year"] = pd.to_datetime(df["Month"], format="%B - %Y", errors="coerce").dt.year
 
     if report_year_filter is not None:
         df = df[df["Month"].str.endswith(str(report_year_filter))].copy()
@@ -1082,6 +1146,7 @@ def build_summary_from_merged(report_df: pd.DataFrame, report_year_filter: Optio
         summary_df[column] = pd.to_numeric(summary_df[column], errors="coerce").fillna(0)
 
     summary_df["Month_dt"] = pd.to_datetime(summary_df["Month"], format="%B - %Y", errors="coerce")
+    summary_df["Year"] = summary_df["Month_dt"].dt.year
     summary_df = summary_df.sort_values(["QAI ID", "Month_dt", "Full Name"], kind="stable").drop(columns=["Month_dt"])
     summary_df = summary_df.reset_index(drop=True)
     return summary_df
@@ -1102,21 +1167,23 @@ def build_time_tracking_lookup(time_tracking_df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns=rename_map)
 
-    required_cols = ["QAI ID", "Month", "total_prod_hours", "total_other_time"]
+    required_cols = ["QAI ID", "Month", "Year", "total_prod_hours", "total_other_time"]
     require_columns(df, required_cols, "Time Tracking Hours worksheet")
 
     df["QAI ID"] = df["QAI ID"].astype(str).str.strip()
     df["Month"] = df["Month"].astype(str).str.strip()
+    df["Year"] = pd.to_numeric(df["Year"], errors="coerce").fillna(0).astype(int)
     df["total_prod_hours"] = pd.to_numeric(df["total_prod_hours"], errors="coerce").fillna(0)
     df["total_other_time"] = pd.to_numeric(df["total_other_time"], errors="coerce").fillna(0)
 
     df = df[df["QAI ID"].ne("") & df["Month"].ne("")].copy()
 
     df = (
-        df.groupby(["QAI ID", "Month"], as_index=False)
+        df.groupby(["QAI ID", "Month", "Year"], as_index=False)
         .agg({
             "total_prod_hours": "sum",
             "total_other_time": "sum",
+            **{col: "sum" for col in INTERNAL_TIME_TRACKING_HOUR_COLUMNS},
         })
     )
     return df
@@ -1125,9 +1192,11 @@ def build_time_tracking_lookup(time_tracking_df: pd.DataFrame) -> pd.DataFrame:
 def attach_time_tracking_to_summary(summary_df: pd.DataFrame, time_tracking_lookup_df: pd.DataFrame) -> pd.DataFrame:
     LOGGER.info("Attaching time tracking hours to summary")
 
-    out = summary_df.merge(time_tracking_lookup_df, on=["QAI ID", "Month"], how="left")
+    out = summary_df.merge(time_tracking_lookup_df, on=["QAI ID", "Month", "Year"], how="left")
     out["total_prod_hours"] = pd.to_numeric(out["total_prod_hours"], errors="coerce").fillna(0)
     out["total_other_time"] = pd.to_numeric(out["total_other_time"], errors="coerce").fillna(0)
+    for col in INTERNAL_TIME_TRACKING_HOUR_COLUMNS:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
     return out
 
 
@@ -1195,10 +1264,13 @@ def enrich_summary(
         out[column] = pd.to_numeric(out[column], errors="coerce").fillna(0)
     out["total_prod_hours"] = pd.to_numeric(out["total_prod_hours"], errors="coerce").fillna(0)
     out["total_other_time"] = pd.to_numeric(out["total_other_time"], errors="coerce").fillna(0)
+    for column in INTERNAL_TIME_TRACKING_HOUR_COLUMNS:
+        out[column] = pd.to_numeric(out[column], errors="coerce").fillna(0)
 
     out["Final Hour"] = out["Effective Hours"] + out["total_other_time"]
     out["Difference"] = out["Active Hour"] - out["Final Hour"]
     out = out.drop(columns=["Joining Date_roster", "Role_roster"])
+    out = out.drop(columns=SUMMARY_DETAIL_COLUMNS, errors="ignore")
 
     ordered_cols = [
         "QAI ID",
@@ -1209,9 +1281,10 @@ def enrich_summary(
         "Role",
         "Resource Type",
         "Resource Allocation",
+        "Year",
         "Month",
         "Effective Hours",
-        *SUMMARY_DETAIL_COLUMNS,
+        *INTERNAL_TIME_TRACKING_HOUR_COLUMNS,
         "total_prod_hours",
         "total_other_time",
         "Final Hour",
